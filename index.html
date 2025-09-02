@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Interactive Wellness Wheel</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script type="module">
+        // Firebase and Firestore imports
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, onSnapshot, setDoc, getDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Global variables provided by the environment
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        // --- Firebase Initialization and Authentication ---
+        let app, db, auth;
+        let userId = null;
+        let isAuthReady = false;
+        
+        // Asynchronous function to initialize Firebase and authenticate
+        async function initializeFirebase() {
+            try {
+                if (Object.keys(firebaseConfig).length === 0) {
+                    console.error("Firebase config is missing.");
+                    return;
+                }
+                app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                
+                // Moved the onAuthStateChanged listener here to ensure 'auth' is defined
+                onAuthStateChanged(auth, async (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        isAuthReady = true;
+                        console.log("User authenticated:", userId);
+                        initApp();
+                    } else {
+                        console.log("User signed out or authentication failed.");
+                        isAuthReady = false; // Reset auth state
+                    }
+                });
+                
+                // Use a custom token if available, otherwise sign in anonymously
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+
+                console.log("Firebase initialized successfully.");
+
+            } catch (error) {
+                console.error("Error during Firebase initialization or sign-in:", error);
+            }
+        }
+
+        const categories = [
+            'Physical',
+            'Emotional',
+            'Intellectual',
+            'Social',
+            'Spiritual',
+            'Environmental',
+            'Financial',
+            'Occupational'
+        ];
+        const categoryColors = [
+            '#FCA5A5', '#FDBA74', '#FCD34D', '#A7F3D0', '#A5B4FC', '#C4B5FD', '#94D3A1', '#8EB9D8'
+        ];
+        const canvas = document.getElementById('wheelCanvas');
+        const ctx = canvas.getContext('2d');
+        const scoreContainer = document.getElementById('scoreContainer');
+
+        const initialScores = categories.reduce((acc, category) => {
+            acc[category] = 5;
+            return acc;
+        }, {});
+
+        let currentScores = { ...initialScores };
+        let unsubscribe = null;
+        let isReadOnly = false;
+        let viewUserId = null;
+
+        function initApp() {
+            const urlParams = new URLSearchParams(window.location.search);
+            viewUserId = urlParams.get('userId');
+            
+            // Initial UI update to show the wheel immediately
+            updateUI(initialScores);
+
+            if (viewUserId) {
+                isReadOnly = true;
+                document.getElementById('generateLinkButton').style.display = 'none';
+                document.getElementById('infoText').innerText = 'This is a view-only version of a student\'s wheel.';
+            } else {
+                document.getElementById('userIdDisplay').innerText = `User ID: ${userId}`;
+                document.getElementById('generateLinkButton').style.display = 'block';
+            }
+            
+            setupEventListeners();
+            loadUserData();
+        }
+
+        function setupEventListeners() {
+            scoreContainer.addEventListener('input', (e) => {
+                if (e.target.tagName === 'INPUT' && !isReadOnly) {
+                    const category = e.target.dataset.category;
+                    const value = parseInt(e.target.value);
+                    if (currentScores[category] !== value) {
+                        currentScores[category] = value;
+                        drawWheel(currentScores);
+                        saveData();
+                    }
+                }
+            });
+
+            window.addEventListener('resize', () => {
+                drawWheel(currentScores);
+            });
+            
+            document.getElementById('generateLinkButton').addEventListener('click', generateShareableLink);
+        }
+
+        function generateShareableLink() {
+            if (!userId) {
+                console.error("User ID not available.");
+                return;
+            }
+            const currentURL = window.location.href.split('?')[0];
+            const shareableLink = `${currentURL}?userId=${userId}`;
+            
+            const shareLinkElement = document.getElementById('shareableLink');
+            shareLinkElement.innerText = shareableLink;
+            shareLinkElement.href = shareableLink;
+            
+            const copyButton = document.getElementById('copyLinkButton');
+            copyButton.style.display = 'inline-block';
+            copyButton.addEventListener('click', () => {
+                navigator.clipboard.writeText(shareableLink).then(() => {
+                    copyButton.innerText = 'Copied!';
+                    setTimeout(() => copyButton.innerText = 'Copy Link', 2000);
+                }).catch(err => {
+                    console.error('Could not copy text: ', err);
+                });
+            });
+            document.getElementById('linkContainer').classList.remove('hidden');
+        }
+
+        // Function to load data from Firestore
+        function loadUserData() {
+            const targetUserId = isReadOnly ? viewUserId : userId;
+            if (!db || !isAuthReady || !targetUserId) {
+                console.error("Firestore not ready or user not authenticated.");
+                return;
+            }
+
+            const docPath = `artifacts/${appId}/users/${targetUserId}/wellness_data/scores`;
+            const docRef = doc(db, docPath);
+
+            // Set up a real-time listener
+            if (unsubscribe) {
+                unsubscribe();
+            }
+            unsubscribe = onSnapshot(docRef, (docSnap) => {
+                if (docSnap.exists()) {
+                    const data = docSnap.data();
+                    currentScores = data.scores || initialScores;
+                    updateUI(currentScores);
+                } else {
+                    console.log("No data found for this user. Using initial scores.");
+                    updateUI(initialScores);
+                }
+            }, (error) => {
+                console.error("Error listening to document:", error);
+            });
+        }
+
+        // Function to save data to Firestore
+        async function saveData() {
+            if (!db || !isAuthReady || !userId) {
+                console.error("Firestore not ready or user not authenticated. Cannot save data.");
+                return;
+            }
+
+            const docPath = `artifacts/${appId}/users/${userId}/wellness_data/scores`;
+            const docRef = doc(db, docPath);
+            
+            try {
+                await setDoc(docRef, {
+                    scores: currentScores,
+                    lastUpdated: new Date()
+                }, { merge: true });
+            } catch (e) {
+                console.error("Error saving document:", e);
+            }
+        }
+        
+        // Function to update the UI with scores from Firestore
+        function updateUI(scores) {
+            scoreContainer.innerHTML = '';
+            categories.forEach(category => {
+                const value = scores[category] || 5;
+                const container = document.createElement('div');
+                container.className = 'flex flex-col items-start w-full';
+                container.innerHTML = `
+                    <label for="${category}" class="font-semibold text-gray-700 mb-1">${category}: <span id="${category}Value" class="font-normal text-gray-500">${value}</span></label>
+                    <input type="range" id="${category}" data-category="${category}" min="1" max="10" value="${value}" class="${isReadOnly ? 'cursor-default' : 'cursor-pointer'} w-full h-2 bg-gray-200 rounded-lg appearance-none" ${isReadOnly ? 'disabled' : ''}>
+                `;
+                scoreContainer.appendChild(container);
+                document.getElementById(`${category}Value`).innerText = value;
+            });
+            drawWheel(scores);
+        }
+
+        // Main function to draw the wellness wheel on the canvas
+        function drawWheel(scores) {
+            const size = Math.min(canvas.offsetWidth, canvas.offsetHeight, 400);
+            const centerX = size / 2;
+            const centerY = size / 2;
+            const radius = size * 0.45;
+            const innerRadius = radius * 0.2;
+
+            canvas.width = size;
+            canvas.height = size;
+            ctx.clearRect(0, 0, size, size);
+
+            // Draw outer gray ring
+            ctx.beginPath();
+            ctx.arc(centerX, centerY, radius, 0, 2 * Math.PI);
+            ctx.fillStyle = '#E5E7EB';
+            ctx.fill();
+            ctx.closePath();
+            
+            const totalCategories = categories.length;
+            const angleStep = (2 * Math.PI) / totalCategories;
+
+            // Draw each colored segment based on scores
+            categories.forEach((category, index) => {
+                const score = scores[category] || 5;
+                const startAngle = index * angleStep - Math.PI / 2;
+                const endAngle = (index + 1) * angleStep - Math.PI / 2;
+                const segmentRadius = innerRadius + (radius - innerRadius) * (score / 10);
+
+                ctx.beginPath();
+                ctx.moveTo(centerX, centerY);
+                ctx.arc(centerX, centerY, segmentRadius, startAngle, endAngle);
+                ctx.closePath();
+                ctx.fillStyle = categoryColors[index];
+                ctx.fill();
+            });
+            
+            // Draw radial lines and category labels
+            categories.forEach((category, index) => {
+                const startAngle = index * angleStep - Math.PI / 2;
+                const endAngle = (index + 1) * angleStep - Math.PI / 2;
+                
+                // Draw line
+                ctx.beginPath();
+                ctx.moveTo(centerX, centerY);
+                ctx.lineTo(centerX + radius * Math.cos(startAngle), centerY + radius * Math.sin(startAngle));
+                ctx.strokeStyle = '#D1D5DB';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+
+                // Draw label
+                const labelAngle = startAngle + angleStep / 2;
+                const labelRadius = radius * 1.1;
+                ctx.font = '12px Inter, sans-serif';
+                ctx.fillStyle = '#374151';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                const x = centerX + labelRadius * Math.cos(labelAngle);
+                const y = centerY + labelRadius * Math.sin(labelAngle);
+                ctx.fillText(category, x, y);
+            });
+
+            // Draw inner circle
+            ctx.beginPath();
+            ctx.arc(centerX, centerY, innerRadius, 0, 2 * Math.PI);
+            ctx.fillStyle = '#FFFFFF';
+            ctx.fill();
+            ctx.strokeStyle = '#D1D5DB';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+        }
+
+        // Initialize Firebase on window load
+        window.onload = function() {
+            initializeFirebase();
+        };
+
+    </script>
+</head>
+<body class="bg-gray-100 font-sans p-4 flex flex-col items-center justify-center min-h-screen">
+
+    <div class="max-w-4xl w-full bg-white rounded-2xl shadow-xl p-8 flex flex-col md:flex-row gap-8 items-center justify-center">
+
+        <!-- Left side: Wellness Wheel -->
+        <div class="flex flex-col items-center justify-center md:w-1/2 min-h-[400px]">
+            <h1 class="text-3xl font-bold text-gray-800 mb-4">Wellness Wheel</h1>
+            <p id="infoText" class="text-sm text-gray-500 mb-4 text-center">Adjust your levels to see your current balance. Your data is saved automatically!</p>
+            <canvas id="wheelCanvas" class="w-full aspect-square"></canvas>
+        </div>
+
+        <!-- Right side: Scores and Inputs -->
+        <div class="flex flex-col items-start w-full md:w-1/2">
+            <div id="scoreContainer" class="w-full flex flex-col gap-4">
+                <!-- Sliders will be dynamically populated here -->
+            </div>
+
+            <div class="mt-8 w-full flex flex-col items-center">
+                <button id="generateLinkButton" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-6 rounded-full shadow-lg transition-transform transform hover:scale-105 duration-200">
+                    Generate Shareable Link
+                </button>
+                <div id="linkContainer" class="hidden mt-4 w-full flex flex-col items-center">
+                    <p class="text-xs text-gray-600 mb-2">Copy this link to submit your work:</p>
+                    <a id="shareableLink" href="#" target="_blank" class="w-full text-xs text-blue-500 hover:underline break-all mb-2 rounded-lg bg-gray-100 p-2"></a>
+                    <button id="copyLinkButton" class="bg-gray-200 text-gray-700 text-sm font-semibold py-1 px-4 rounded-full hover:bg-gray-300 transition-colors">
+                        Copy Link
+                    </button>
+                </div>
+            </div>
+
+            <div id="userIdDisplay" class="mt-8 text-xs text-gray-400 text-center w-full break-all"></div>
+        </div>
+    </div>
+
+</body>
+</html>
